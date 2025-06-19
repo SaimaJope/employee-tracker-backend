@@ -65,7 +65,7 @@ async function startServer() {
                 'SELECT COUNT(*) AS count FROM employees WHERE company_id = ?',
                 companyId
             );
-            // Safely default to 0 if result is null/undefined
+            // This is the key fix: Safely get the count, defaulting to 0 if the result is strange
             const currentEmployees = employeeCountResult ? employeeCountResult.count : 0;
 
             console.log(`Company ${companyId}: Limit is ${company.max_employees}, Current count is ${currentEmployees}`);
@@ -76,7 +76,9 @@ async function startServer() {
                 });
             }
 
+            // All checks passed, proceed to the next step (the actual route handler)
             next();
+
         } catch (error) {
             console.error("CRITICAL: Employee limit check failed:", error);
             res.status(500).json({ message: "Server error while checking subscription." });
@@ -164,127 +166,4 @@ async function startServer() {
     app.get('/api/employees', authenticateToken, async (req, res) => {
         try {
             const employees = await db.all(
-                'SELECT * FROM employees WHERE company_id = ? ORDER BY name',
-                req.user.companyId
-            );
-            res.json(employees);
-        } catch (error) {
-            res.status(500).json({ message: "Failed to retrieve employees." });
-        }
-    });
-
-    // --- ADD EMPLOYEE WITH SUBSCRIPTION ENFORCEMENT ---
-    app.post(
-        '/api/employees',
-        authenticateToken,
-        checkEmployeeLimit,
-        async (req, res) => {
-            const { name, nfc_card_id } = req.body;
-            if (!name || !nfc_card_id)
-                return res.status(400).json({ message: "Name and card ID required." });
-            try {
-                await db.run(
-                    'INSERT INTO employees (company_id, name, nfc_card_id) VALUES (?, ?, ?)',
-                    [req.user.companyId, name, nfc_card_id]
-                );
-                res.status(201).json({ message: 'Employee added.' });
-            } catch (error) {
-                console.error("ADD EMPLOYEE ERROR:", error);
-                res.status(500).json({ message: "Failed to add employee." });
-            }
-        }
-    );
-
-    // --- DELETE EMPLOYEE ---
-    app.delete('/api/employees/:id', authenticateToken, async (req, res) => {
-        const companyId = req.user.companyId;
-        const employeeId = req.params.id;
-
-        try {
-            const result = await db.run(
-                'DELETE FROM employees WHERE id = ? AND company_id = ?',
-                [employeeId, companyId]
-            );
-
-            if (result.changes === 0) {
-                return res.status(404).json({ message: "Employee not found or you do not have permission." });
-            }
-
-            res.status(200).json({ message: 'Employee deleted successfully.' });
-
-        } catch (error) {
-            console.error("Error deleting employee:", error);
-            res.status(500).json({ message: 'Failed to delete employee.' });
-        }
-    });
-
-    // --- KIOSK ROUTE ---
-    app.post('/api/kiosk/tap', async (req, res) => {
-        const apiKey = req.headers['x-api-key'];
-        const { nfc_card_id } = req.body;
-        if (!apiKey || !nfc_card_id)
-            return res.status(400).json({ message: "API key and NFC card ID are required." });
-        try {
-            const kiosk = await db.get('SELECT * FROM kiosks WHERE api_key = ?', apiKey);
-            if (!kiosk) return res.status(401).json({ message: "Invalid API Key." });
-            const companyId = kiosk.company_id;
-            const employee = await db.get(
-                'SELECT * FROM employees WHERE nfc_card_id = ? AND company_id = ?',
-                [nfc_card_id, companyId]
-            );
-            if (!employee)
-                return res.status(404).json({ success: false, message: 'Card not registered.' });
-
-            // Cooldown check
-            const timeDiffCheck = await db.get(
-                `SELECT (strftime('%s','now') - strftime('%s',timestamp)) / 60.0 AS minutes_ago
-                 FROM attendance_logs
-                 WHERE employee_id = ?
-                 ORDER BY timestamp DESC
-                 LIMIT 1`,
-                employee.id
-            );
-            if (timeDiffCheck && timeDiffCheck.minutes_ago < 10) {
-                return res.status(429).json({ success: false, message: `Cooldown active.` });
-            }
-
-            // Toggle check-in / check-out
-            const lastLog = await db.get(
-                `SELECT event_type
-                 FROM attendance_logs
-                 WHERE employee_id = ?
-                 ORDER BY timestamp DESC
-                 LIMIT 1`,
-                employee.id
-            );
-            const newEventType = (!lastLog || lastLog.event_type === 'check-out')
-                ? 'check-in'
-                : 'check-out';
-
-            await db.run(
-                `INSERT INTO attendance_logs 
-                    (company_id, employee_id, kiosk_id, nfc_card_id, event_type)
-                 VALUES (?, ?, ?, ?, ?)`,
-                [companyId, employee.id, kiosk.id, nfc_card_id, newEventType]
-            );
-
-            res.json({
-                success: true,
-                message: `Welcome, ${employee.name}!`,
-                employee_name: employee.name,
-                action: newEventType
-            });
-        } catch (error) {
-            console.error("KIOSK TAP ERROR:", error);
-            res.status(500).json({ message: "An error occurred during the tap." });
-        }
-    });
-
-    // --- START SERVER ---
-    const port = process.env.PORT || 3001;
-    app.listen(port, () => {
-        console.log(`Server started on port ${port}`);
-    });
-}
-
-startServer();
+                'SELECT * FROM employees WHERE company_id =
