@@ -1,3 +1,5 @@
+// index.js - The final, complete, and secure backend code
+
 const express = require('express');
 const { open } = require('sqlite');
 const sqlite3 = require('sqlite3');
@@ -5,7 +7,6 @@ const cors = require('cors');
 const path = require('path');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
 const { setupDatabase } = require('./database');
 
 const config = {
@@ -71,61 +72,108 @@ async function startServer() {
         res.status(501).send({ message: "Registration not implemented in this snippet." });
     });
 
-    // =========================================================================
-    // === TEMPORARY, INSECURE LOGIN ROUTE FOR TESTING PERFORMANCE ===
-    // This code SKIPS the password check to see if bcrypt is the bottleneck.
-    // DO NOT USE THIS IN PRODUCTION.
-    // =========================================================================
+    // --- SECURE LOGIN ROUTE ---
     app.post('/api/auth/login', async (req, res) => {
         try {
             const { email, password } = req.body;
             if (!email || !password) {
                 return res.status(400).json({ message: 'Email and password are required.' });
             }
-
             const user = await db.get('SELECT * FROM users WHERE email = ?', email);
             if (!user) {
                 return res.status(401).json({ message: 'Invalid email or password.' });
             }
-
-            // --- PASSWORD CHECK IS DISABLED FOR THIS TEST ---
-            console.log(`--- SKIPPING PASSWORD CHECK FOR: ${email} (TESTING ONLY) ---`);
-
-            const payload = {
-                id: user.id,
-                email: user.email,
-                companyId: user.company_id
-            };
-
+            const isPasswordCorrect = await bcrypt.compare(password, user.password_hash);
+            if (!isPasswordCorrect) {
+                return res.status(401).json({ message: 'Invalid email or password.' });
+            }
+            const payload = { id: user.id, email: user.email, companyId: user.company_id };
             const token = jwt.sign(payload, config.JWT_SECRET, { expiresIn: '8h' });
-
-            console.log(`Successful test login for user: ${email}`);
-            return res.status(200).json({
-                message: 'Login successful!',
-                token: token
-            });
-
+            res.status(200).json({ message: 'Login successful!', token: token });
         } catch (error) {
             console.error('--- LOGIN ERROR ---', error);
-            return res.status(500).json({ message: 'An internal server error occurred.' });
+            res.status(500).json({ message: 'An internal server error occurred.' });
         }
     });
 
+    // --- NEW: ATTENDANCE LOGS ROUTE ---
+    app.get('/api/logs', authenticateToken, async (req, res) => {
+        try {
+            // This query joins the logs with the employees table to get the name
+            const logs = await db.all(`
+                SELECT
+                    al.id,
+                    al.event_type,
+                    al.timestamp,
+                    al.nfc_card_id,
+                    e.name AS employee_name
+                FROM
+                    attendance_logs AS al
+                LEFT JOIN
+                    employees AS e ON al.employee_id = e.id
+                WHERE
+                    al.company_id = ?
+                ORDER BY
+                    al.timestamp DESC
+                LIMIT 100
+            `, req.user.companyId); // Filter by the logged-in user's company
+            res.json(logs);
+        } catch (error) {
+            console.error("Error fetching logs:", error);
+            res.status(500).json({ message: "Failed to fetch attendance logs." });
+        }
+    });
 
-    // (Other secured routes)
+    // --- NEW: KIOSKS ROUTE ---
+    app.get('/api/kiosks', authenticateToken, async (req, res) => {
+        try {
+            const kiosks = await db.all('SELECT * FROM kiosks WHERE company_id = ?', req.user.companyId);
+            res.json(kiosks);
+        } catch (error) {
+            console.error("Error fetching kiosks:", error);
+            res.status(500).json({ message: "Failed to fetch kiosks." });
+        }
+    });
+
+    // --- EMPLOYEE MANAGEMENT ROUTES ---
     app.get('/api/employees', authenticateToken, async (req, res) => {
         const employees = await db.all('SELECT * FROM employees WHERE company_id = ? ORDER BY name', req.user.companyId);
         res.json(employees);
     });
 
     app.post('/api/employees', authenticateToken, checkEmployeeLimit, async (req, res) => {
-        // ... your working add employee logic ...
-        res.status(501).send({ message: "Not implemented in this snippet." });
+        try {
+            const { name, nfc_card_id } = req.body;
+            if (!name || !nfc_card_id) {
+                return res.status(400).json({ message: "Name and NFC card ID are required." });
+            }
+            await db.run(
+                'INSERT INTO employees (company_id, name, nfc_card_id) VALUES (?, ?, ?)',
+                req.user.companyId, name, nfc_card_id
+            );
+            res.status(201).json({ message: 'Employee added successfully.' });
+        } catch (error) {
+            console.error("Error adding employee:", error);
+            res.status(500).json({ message: "Failed to add employee. The card ID might already be in use." });
+        }
     });
 
     app.delete('/api/employees/:id', authenticateToken, async (req, res) => {
-        // ... your working delete employee logic ...
-        res.status(501).send({ message: "Not implemented in this snippet." });
+        try {
+            // Make sure the employee belongs to the user's company before deleting
+            const result = await db.run(
+                'DELETE FROM employees WHERE id = ? AND company_id = ?',
+                req.params.id,
+                req.user.companyId
+            );
+            if (result.changes === 0) {
+                return res.status(404).json({ message: "Employee not found or you do not have permission to delete it." });
+            }
+            res.status(200).json({ message: "Employee deleted successfully." });
+        } catch (error) {
+            console.error("Error deleting employee:", error);
+            res.status(500).json({ message: "Failed to delete employee." });
+        }
     });
 
     const port = process.env.PORT || 3001;
