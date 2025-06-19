@@ -13,7 +13,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- HEALTH CHECK ENDPOINT FOR RENDER ---
 app.get('/', (req, res) => {
     res.status(200).send({ status: 'ok', message: 'Server is live and healthy!' });
 });
@@ -31,7 +30,6 @@ async function startServer() {
         process.exit(1);
     });
     console.log(`Successfully connected to the database at ${dbPath}`);
-
     await setupDatabase(db);
 
     const authenticateToken = (req, res, next) => {
@@ -64,7 +62,33 @@ async function startServer() {
         }
     });
 
-    // ... your other working endpoints (/login, /logs, /employees, /tap) go here ...
+    // --- THIS IS THE MISSING/BROKEN ENDPOINT ---
+    app.post('/api/auth/login', async (req, res) => {
+        const { email, password } = req.body;
+        if (!email || !password) {
+            return res.status(400).json({ message: "Email and password are required." });
+        }
+        try {
+            const user = await db.get('SELECT * FROM users WHERE email = ?', email);
+            if (!user) {
+                return res.status(401).json({ message: "Invalid credentials." });
+            }
+            const isPasswordCorrect = await bcrypt.compare(password, user.password_hash);
+            if (!isPasswordCorrect) {
+                return res.status(401).json({ message: "Invalid credentials." });
+            }
+            const payload = { userId: user.id, companyId: user.company_id };
+            const token = jwt.sign(payload, config.JWT_SECRET, { expiresIn: '8h' });
+            res.json({ message: "Login successful!", token: token });
+        } catch (error) {
+            console.error("LOGIN ERROR:", error);
+            res.status(500).json({ message: "Login failed.", details: error.message });
+        }
+    });
+    // --- END OF THE LOGIN ENDPOINT ---
+
+    // Your other endpoints (/logs, /employees, /tap) go here
+    // ...
 
     const port = process.env.PORT || 3001;
     app.listen(port, () => {
