@@ -1,0 +1,14 @@
+# Node modules
+node_modules
+
+# Log files
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Database file - we don't want to upload our local test DB
+*.db
+*.db-journal
+
+# Environment files
+.env
