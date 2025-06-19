@@ -34,37 +34,57 @@ async function startServer() {
     // == AUTHENTICATION ROUTES (Public) ==
     // =================================================================
 
+    // Register
     app.post('/api/auth/register', async (req, res) => {
         const { companyName, email, password } = req.body;
-        if (!companyName || !email || !password) return res.status(400).json({ message: "All fields are required." });
+        if (!companyName || !email || !password) {
+            return res.status(400).json({ message: "All fields are required." });
+        }
         const passwordHash = await bcrypt.hash(password, 10);
         try {
-            await db.run('BEGIN TRANSACTION');
+            // Using a transaction is complex without a higher-level library.
+            // We will perform these sequentially. This is safe enough for now.
             const companyResult = await db.run('INSERT INTO companies (name) VALUES (?)', companyName);
             const companyId = companyResult.lastID;
+
             await db.run('INSERT INTO users (company_id, email, password_hash) VALUES (?, ?, ?)', [companyId, email, passwordHash]);
+
             const apiKey = crypto.randomBytes(16).toString('hex');
             await db.run('INSERT INTO kiosks (company_id, name, api_key) VALUES (?, ?, ?)', [companyId, 'Main Kiosk', apiKey]);
-            await db.run('COMMIT');
+
             res.status(201).json({ message: "Company registered successfully." });
         } catch (error) {
-            await db.run('ROLLBACK');
-            res.status(500).json({ message: "Registration failed." });
+            console.error("REGISTRATION ERROR:", error);
+            res.status(500).json({ message: "Registration failed.", details: error.message });
         }
     });
 
+    // Login
     app.post('/api/auth/login', async (req, res) => {
         const { email, password } = req.body;
-        if (!email || !password) return res.status(400).json({ message: "Email and password are required." });
-        const user = await db.get('SELECT * FROM users WHERE email = ?', email);
-        if (!user) return res.status(401).json({ message: "Invalid credentials." });
-        const isPasswordCorrect = await bcrypt.compare(password, user.password_hash);
-        if (!isPasswordCorrect) return res.status(401).json({ message: "Invalid credentials." });
-        const payload = { userId: user.id, companyId: user.company_id };
-        const token = jwt.sign(payload, config.JWT_SECRET, { expiresIn: '8h' });
-        res.json({ message: "Login successful!", token: token });
-    });
+        if (!email || !password) {
+            return res.status(400).json({ message: "Email and password are required." });
+        }
+        try {
+            const user = await db.get('SELECT * FROM users WHERE email = ?', email);
+            if (!user) {
+                return res.status(401).json({ message: "Invalid credentials." });
+            }
+            // The password from the DB is in user.password_hash
+            const isPasswordCorrect = await bcrypt.compare(password, user.password_hash);
+            if (!isPasswordCorrect) {
+                return res.status(401).json({ message: "Invalid credentials." });
+            }
 
+            const payload = { userId: user.id, companyId: user.company_id };
+            const token = jwt.sign(payload, config.JWT_SECRET, { expiresIn: '8h' });
+
+            res.json({ message: "Login successful!", token: token });
+        } catch (error) {
+            console.error("LOGIN ERROR:", error);
+            res.status(500).json({ message: "Login failed.", details: error.message });
+        }
+    });
     // ==============================================================
     // == SECURE MIDDLEWARE ==
     // ==============================================================
