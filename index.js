@@ -23,6 +23,7 @@ const dataDir = isProduction ? process.env.RENDER_DISK_PATH : __dirname;
 const dbPath = path.join(dataDir, 'employee_tracker.db');
 
 async function startServer() {
+    // Open & initialize DB
     const db = await open({
         filename: dbPath,
         driver: sqlite3.Database
@@ -31,13 +32,13 @@ async function startServer() {
         process.exit(1);
     });
     console.log(`Successfully connected to DB at ${dbPath}`);
-
     await setupDatabase(db);
 
+    // --- AUTHENTICATION MIDDLEWARE ---
     const authenticateToken = (req, res, next) => {
         const authHeader = req.headers['authorization'];
         const token = authHeader && authHeader.split(' ')[1];
-        if (token == null) return res.sendStatus(401);
+        if (!token) return res.sendStatus(401);
         jwt.verify(token, config.JWT_SECRET, (err, user) => {
             if (err) return res.sendStatus(403);
             req.user = user;
@@ -45,19 +46,62 @@ async function startServer() {
         });
     };
 
+    // --- NEW ROBUST SUBSCRIPTION CHECK MIDDLEWARE ---
+    const checkEmployeeLimit = async (req, res, next) => {
+        const companyId = req.user.companyId;
+
+        try {
+            // Get the company's plan details
+            const company = await db.get(
+                'SELECT max_employees FROM companies WHERE id = ?',
+                companyId
+            );
+            if (!company) {
+                return res.status(404).json({ message: "Company not found." });
+            }
+
+            // Get the current employee count separately
+            const countRow = await db.get(
+                'SELECT COUNT(*) AS count FROM employees WHERE company_id = ?',
+                companyId
+            );
+            const currentEmployees = countRow.count;
+
+            console.log(`Company ${companyId}: Limit is ${company.max_employees}, Current is ${currentEmployees}`);
+
+            if (currentEmployees >= company.max_employees) {
+                return res.status(403).json({
+                    message: `Employee limit of ${company.max_employees} reached. Please upgrade your plan.`
+                });
+            }
+
+            next();
+        } catch (error) {
+            console.error("Employee limit check failed:", error);
+            res.status(500).json({ message: "Error checking subscription status." });
+        }
+    };
+
     // --- AUTH ROUTES ---
     app.post('/api/auth/register', async (req, res) => {
         const { companyName, email, password } = req.body;
-        if (!companyName || !email || !password) return res.status(400).json({ message: "All fields required." });
+        if (!companyName || !email || !password)
+            return res.status(400).json({ message: "All fields required." });
         try {
             const passwordHash = await bcrypt.hash(password, 10);
             await db.run('INSERT INTO companies (name) VALUES (?)', companyName);
             const newCompany = await db.get('SELECT id FROM companies WHERE name = ?', companyName);
             if (!newCompany) throw new Error("Failed to create company.");
             const companyId = newCompany.id;
-            await db.run('INSERT INTO users (company_id, email, password_hash) VALUES (?, ?, ?)', [companyId, email, passwordHash]);
+            await db.run(
+                'INSERT INTO users (company_id, email, password_hash) VALUES (?, ?, ?)',
+                [companyId, email, passwordHash]
+            );
             const apiKey = crypto.randomBytes(16).toString('hex');
-            await db.run('INSERT INTO kiosks (company_id, name, api_key) VALUES (?, ?, ?)', [companyId, 'Main Kiosk', apiKey]);
+            await db.run(
+                'INSERT INTO kiosks (company_id, name, api_key) VALUES (?, ?, ?)',
+                [companyId, 'Main Kiosk', apiKey]
+            );
             res.status(201).json({ message: "Company registered successfully." });
         } catch (error) {
             console.error("REGISTRATION ERROR:", error);
@@ -67,13 +111,18 @@ async function startServer() {
 
     app.post('/api/auth/login', async (req, res) => {
         const { email, password } = req.body;
-        if (!email || !password) return res.status(400).json({ message: "Email/password required." });
+        if (!email || !password)
+            return res.status(400).json({ message: "Email/password required." });
         try {
             const user = await db.get('SELECT * FROM users WHERE email = ?', email);
             if (!user) return res.status(401).json({ message: "Invalid credentials." });
             const passOk = await bcrypt.compare(password, user.password_hash);
             if (!passOk) return res.status(401).json({ message: "Invalid credentials." });
-            const token = jwt.sign({ userId: user.id, companyId: user.company_id }, config.JWT_SECRET, { expiresIn: '8h' });
+            const token = jwt.sign(
+                { userId: user.id, companyId: user.company_id },
+                config.JWT_SECRET,
+                { expiresIn: '8h' }
+            );
             res.json({ message: "Login successful!", token });
         } catch (error) {
             console.error("LOGIN ERROR:", error);
@@ -84,7 +133,10 @@ async function startServer() {
     // --- SECURED ROUTES ---
     app.get('/api/kiosks', authenticateToken, async (req, res) => {
         try {
-            const kiosks = await db.all('SELECT id, name, api_key, created_at FROM kiosks WHERE company_id = ?', req.user.companyId);
+            const kiosks = await db.all(
+                'SELECT id, name, api_key, created_at FROM kiosks WHERE company_id = ?',
+                req.user.companyId
+            );
             res.json(kiosks);
         } catch (error) {
             res.status(500).json({ message: "Failed to retrieve kiosks." });
@@ -93,30 +145,75 @@ async function startServer() {
 
     app.get('/api/logs', authenticateToken, async (req, res) => {
         try {
-            const logs = await db.all(`SELECT al.id, al.nfc_card_id, al.event_type, al.timestamp, e.name as employee_name FROM attendance_logs al LEFT JOIN employees e ON al.employee_id = e.id WHERE al.company_id = ? ORDER BY al.timestamp DESC`, req.user.companyId);
+            const logs = await db.all(
+                `SELECT al.id, al.nfc_card_id, al.event_type, al.timestamp,
+                        e.name AS employee_name
+                 FROM attendance_logs al
+                 LEFT JOIN employees e ON al.employee_id = e.id
+                 WHERE al.company_id = ?
+                 ORDER BY al.timestamp DESC`,
+                req.user.companyId
+            );
             res.json(logs);
         } catch (error) {
-            res.status(500).json({ error: "Failed to retrieve logs." });
+            res.status(500).json({ message: "Failed to retrieve logs." });
         }
     });
 
     app.get('/api/employees', authenticateToken, async (req, res) => {
         try {
-            const employees = await db.all('SELECT * FROM employees WHERE company_id = ? ORDER BY name', req.user.companyId);
+            const employees = await db.all(
+                'SELECT * FROM employees WHERE company_id = ? ORDER BY name',
+                req.user.companyId
+            );
             res.json(employees);
         } catch (error) {
-            res.status(500).json({ error: "Failed to retrieve employees." });
+            res.status(500).json({ message: "Failed to retrieve employees." });
         }
     });
 
-    app.post('/api/employees', authenticateToken, async (req, res) => {
-        const { name, nfc_card_id } = req.body;
-        if (!name || !nfc_card_id) return res.status(400).json({ error: "Name and card ID required." });
+    // --- ADD EMPLOYEE WITH SUBSCRIPTION ENFORCEMENT ---
+    app.post(
+        '/api/employees',
+        authenticateToken,
+        checkEmployeeLimit,
+        async (req, res) => {
+            const { name, nfc_card_id } = req.body;
+            if (!name || !nfc_card_id)
+                return res.status(400).json({ message: "Name and card ID required." });
+            try {
+                await db.run(
+                    'INSERT INTO employees (company_id, name, nfc_card_id) VALUES (?, ?, ?)',
+                    [req.user.companyId, name, nfc_card_id]
+                );
+                res.status(201).json({ message: 'Employee added.' });
+            } catch (error) {
+                console.error("ADD EMPLOYEE ERROR:", error);
+                res.status(500).json({ message: "Failed to add employee." });
+            }
+        }
+    );
+
+    // --- DELETE EMPLOYEE ---
+    app.delete('/api/employees/:id', authenticateToken, async (req, res) => {
+        const companyId = req.user.companyId;
+        const employeeId = req.params.id;
+
         try {
-            await db.run('INSERT INTO employees (company_id, name, nfc_card_id) VALUES (?, ?, ?)', [req.user.companyId, name, nfc_card_id]);
-            res.status(201).json({ message: 'Employee added.' });
+            const result = await db.run(
+                'DELETE FROM employees WHERE id = ? AND company_id = ?',
+                [employeeId, companyId]
+            );
+
+            if (result.changes === 0) {
+                return res.status(404).json({ message: "Employee not found or you do not have permission." });
+            }
+
+            res.status(200).json({ message: 'Employee deleted successfully.' });
+
         } catch (error) {
-            res.status(500).json({ error: "Failed to add employee." });
+            console.error("Error deleting employee:", error);
+            res.status(500).json({ message: 'Failed to delete employee.' });
         }
     });
 
@@ -124,28 +221,65 @@ async function startServer() {
     app.post('/api/kiosk/tap', async (req, res) => {
         const apiKey = req.headers['x-api-key'];
         const { nfc_card_id } = req.body;
-        if (!apiKey || !nfc_card_id) return res.status(400).json({ message: "API key and NFC card ID are required." });
+        if (!apiKey || !nfc_card_id)
+            return res.status(400).json({ message: "API key and NFC card ID are required." });
         try {
             const kiosk = await db.get('SELECT * FROM kiosks WHERE api_key = ?', apiKey);
             if (!kiosk) return res.status(401).json({ message: "Invalid API Key." });
             const companyId = kiosk.company_id;
-            const employee = await db.get('SELECT * FROM employees WHERE nfc_card_id = ? AND company_id = ?', [nfc_card_id, companyId]);
-            if (!employee) return res.status(404).json({ success: false, message: 'Card not registered for this company.' });
-            const timeDiffCheck = await db.get(`SELECT (strftime('%s', 'now') - strftime('%s', timestamp)) / 60.0 as minutes_ago FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1`, employee.id);
-            if (timeDiffCheck && timeDiffCheck.minutes_ago < 10) return res.status(429).json({ success: false, message: `Cooldown active.` });
-            const lastLog = await db.get(`SELECT event_type FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1`, employee.id);
-            const newEventType = (!lastLog || lastLog.event_type === 'check-out') ? 'check-in' : 'check-out';
-            await db.run(`INSERT INTO attendance_logs (company_id, employee_id, kiosk_id, nfc_card_id, event_type) VALUES (?, ?, ?, ?, ?)`, [companyId, employee.id, kiosk.id, nfc_card_id, newEventType]);
-            const message = `Welcome, ${employee.name}!`;
-            res.json({ success: true, message: message, employee_name: employee.name, action: newEventType });
+            const employee = await db.get(
+                'SELECT * FROM employees WHERE nfc_card_id = ? AND company_id = ?',
+                [nfc_card_id, companyId]
+            );
+            if (!employee)
+                return res.status(404).json({ success: false, message: 'Card not registered.' });
+
+            // Cooldown check
+            const timeDiffCheck = await db.get(
+                `SELECT (strftime('%s','now') - strftime('%s',timestamp)) / 60.0 AS minutes_ago
+                 FROM attendance_logs
+                 WHERE employee_id = ?
+                 ORDER BY timestamp DESC
+                 LIMIT 1`,
+                employee.id
+            );
+            if (timeDiffCheck && timeDiffCheck.minutes_ago < 10) {
+                return res.status(429).json({ success: false, message: `Cooldown active.` });
+            }
+
+            // Toggle check-in / check-out
+            const lastLog = await db.get(
+                `SELECT event_type
+                 FROM attendance_logs
+                 WHERE employee_id = ?
+                 ORDER BY timestamp DESC
+                 LIMIT 1`,
+                employee.id
+            );
+            const newEventType = (!lastLog || lastLog.event_type === 'check-out')
+                ? 'check-in'
+                : 'check-out';
+
+            await db.run(
+                `INSERT INTO attendance_logs 
+                    (company_id, employee_id, kiosk_id, nfc_card_id, event_type)
+                 VALUES (?, ?, ?, ?, ?)`,
+                [companyId, employee.id, kiosk.id, nfc_card_id, newEventType]
+            );
+
+            res.json({
+                success: true,
+                message: `Welcome, ${employee.name}!`,
+                employee_name: employee.name,
+                action: newEventType
+            });
         } catch (error) {
             console.error("KIOSK TAP ERROR:", error);
-            res.status(500).json({ message: "An error occurred during the tap event." });
+            res.status(500).json({ message: "An error occurred during the tap." });
         }
     });
 
-
-    // --- START LISTENING ---
+    // --- START SERVER ---
     const port = process.env.PORT || 3001;
     app.listen(port, () => {
         console.log(`Server started on port ${port}`);
