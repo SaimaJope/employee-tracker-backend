@@ -15,11 +15,10 @@ app.use(express.json());
 
 // Health Check Route
 app.get('/', (req, res) => {
-    res.status(200).send({ status: 'ok', message: 'Server is live!' });
+    res.status(200).send({ status: 'ok' });
 });
 
 const isProduction = process.env.NODE_ENV === 'production';
-// This is the line that had the typo
 const dataDir = isProduction ? process.env.RENDER_DISK_PATH : __dirname;
 const dbPath = path.join(dataDir, 'employee_tracker.db');
 
@@ -32,6 +31,7 @@ async function startServer() {
         process.exit(1);
     });
     console.log(`Successfully connected to DB at ${dbPath}`);
+
     await setupDatabase(db);
 
     const authenticateToken = (req, res, next) => {
@@ -45,6 +45,7 @@ async function startServer() {
         });
     };
 
+    // --- AUTH ROUTES ---
     app.post('/api/auth/register', async (req, res) => {
         const { companyName, email, password } = req.body;
         if (!companyName || !email || !password) return res.status(400).json({ message: "All fields required." });
@@ -80,17 +81,21 @@ async function startServer() {
         }
     });
 
+    // --- SECURED ROUTES ---
+    app.get('/api/kiosks', authenticateToken, async (req, res) => {
+        try {
+            const kiosks = await db.all('SELECT id, name, api_key, created_at FROM kiosks WHERE company_id = ?', req.user.companyId);
+            res.json(kiosks);
+        } catch (error) {
+            res.status(500).json({ message: "Failed to retrieve kiosks." });
+        }
+    });
+
     app.get('/api/logs', authenticateToken, async (req, res) => {
         try {
-            const logs = await db.all(`
-                SELECT al.id, al.nfc_card_id, al.event_type, al.timestamp, e.name as employee_name 
-                FROM attendance_logs al LEFT JOIN employees e ON al.employee_id = e.id 
-                WHERE al.company_id = ? ORDER BY al.timestamp DESC`,
-                req.user.companyId
-            );
+            const logs = await db.all(`SELECT al.id, al.nfc_card_id, al.event_type, al.timestamp, e.name as employee_name FROM attendance_logs al LEFT JOIN employees e ON al.employee_id = e.id WHERE al.company_id = ? ORDER BY al.timestamp DESC`, req.user.companyId);
             res.json(logs);
         } catch (error) {
-            console.error("Error fetching logs:", error);
             res.status(500).json({ error: "Failed to retrieve logs." });
         }
     });
@@ -100,7 +105,6 @@ async function startServer() {
             const employees = await db.all('SELECT * FROM employees WHERE company_id = ? ORDER BY name', req.user.companyId);
             res.json(employees);
         } catch (error) {
-            console.error("Error fetching employees:", error);
             res.status(500).json({ error: "Failed to retrieve employees." });
         }
     });
@@ -109,77 +113,42 @@ async function startServer() {
         const { name, nfc_card_id } = req.body;
         if (!name || !nfc_card_id) return res.status(400).json({ error: "Name and card ID required." });
         try {
-            const result = await db.run('INSERT INTO employees (company_id, name, nfc_card_id) VALUES (?, ?, ?)', [req.user.companyId, name, nfc_card_id]);
+            await db.run('INSERT INTO employees (company_id, name, nfc_card_id) VALUES (?, ?, ?)', [req.user.companyId, name, nfc_card_id]);
             res.status(201).json({ message: 'Employee added.' });
         } catch (error) {
-            console.error("Error adding employee:", error);
             res.status(500).json({ error: "Failed to add employee." });
         }
     });
 
-    // Add this with your other secured routes (like /api/employees)
-    app.get('/api/kiosks', authenticateToken, async (req, res) => {
-        try {
-            const kiosks = await db.all('SELECT id, name, api_key, created_at FROM kiosks WHERE company_id = ?', req.user.companyId);
-            res.json(kiosks);
-        } catch (error) {
-            console.error("Error fetching kiosks:", error);
-            res.status(500).json({ message: "Failed to retrieve kiosks." });
-        }
-    });
-
-    // This is the new, secure tap endpoint for the KIOSK
+    // --- KIOSK ROUTE ---
     app.post('/api/kiosk/tap', async (req, res) => {
-        // The Kiosk will send its API key in the headers
         const apiKey = req.headers['x-api-key'];
         const { nfc_card_id } = req.body;
-
-        if (!apiKey || !nfc_card_id) {
-            return res.status(400).json({ message: "API key and NFC card ID are required." });
-        }
-
+        if (!apiKey || !nfc_card_id) return res.status(400).json({ message: "API key and NFC card ID are required." });
         try {
-            // Step 1: Find the kiosk and its company based on the API key
             const kiosk = await db.get('SELECT * FROM kiosks WHERE api_key = ?', apiKey);
-            if (!kiosk) {
-                return res.status(401).json({ message: "Invalid API Key." });
-            }
+            if (!kiosk) return res.status(401).json({ message: "Invalid API Key." });
             const companyId = kiosk.company_id;
-
-            // Step 2: Find the employee WITHIN THAT COMPANY
-            const employee = await db.get(
-                'SELECT * FROM employees WHERE nfc_card_id = ? AND company_id = ?',
-                [nfc_card_id, companyId]
-            );
-            if (!employee) {
-                return res.status(404).json({ success: false, message: 'Card not registered for this company.' });
-            }
-
-            // Step 3: Run the cooldown and check-in/out logic (this is the same as before)
-            const timeDiffCheck = await db.get(
-                `SELECT (strftime('%s', 'now') - strftime('%s', timestamp)) / 60.0 as minutes_ago 
-             FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1`,
-                employee.id
-            );
-            if (timeDiffCheck && timeDiffCheck.minutes_ago < 10) {
-                return res.status(429).json({ success: false, message: `Cooldown active.` });
-            }
-
+            const employee = await db.get('SELECT * FROM employees WHERE nfc_card_id = ? AND company_id = ?', [nfc_card_id, companyId]);
+            if (!employee) return res.status(404).json({ success: false, message: 'Card not registered for this company.' });
+            const timeDiffCheck = await db.get(`SELECT (strftime('%s', 'now') - strftime('%s', timestamp)) / 60.0 as minutes_ago FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1`, employee.id);
+            if (timeDiffCheck && timeDiffCheck.minutes_ago < 10) return res.status(429).json({ success: false, message: `Cooldown active.` });
             const lastLog = await db.get(`SELECT event_type FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1`, employee.id);
             const newEventType = (!lastLog || lastLog.event_type === 'check-out') ? 'check-in' : 'check-out';
-
-            await db.run(
-                `INSERT INTO attendance_logs (company_id, employee_id, kiosk_id, nfc_card_id, event_type) VALUES (?, ?, ?, ?, ?)`,
-                [companyId, employee.id, kiosk.id, nfc_card_id, newEventType]
-            );
-
+            await db.run(`INSERT INTO attendance_logs (company_id, employee_id, kiosk_id, nfc_card_id, event_type) VALUES (?, ?, ?, ?, ?)`, [companyId, employee.id, kiosk.id, nfc_card_id, newEventType]);
             const message = `Welcome, ${employee.name}!`;
             res.json({ success: true, message: message, employee_name: employee.name, action: newEventType });
-
         } catch (error) {
             console.error("KIOSK TAP ERROR:", error);
             res.status(500).json({ message: "An error occurred during the tap event." });
         }
+    });
+
+
+    // --- START LISTENING ---
+    const port = process.env.PORT || 3001;
+    app.listen(port, () => {
+        console.log(`Server started on port ${port}`);
     });
 }
 
