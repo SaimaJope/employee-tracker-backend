@@ -1,12 +1,19 @@
 {
-  "name": "backend",
-  "version": "1.0.0",
-  "main": "index.js",
-    "scripts": {
-        "start": "node index.js",
-        "test": "echo \"Error: no test specified\" && exit 1"
-    },
-  "keywords": [],
+    {
+        "name": "employee-tracker-backend",
+        "version": "1.0.0",
+        "description": "",
+        "main": "index.js",
+        "scripts": {
+            "start": "node index.js",
+            "test": "echo \"Error: no test specified\" && exit 1"
+        },
+        "engines": { // <-- ADD THIS ENTIRE BLOCK
+            "node": "20.x"
+        },
+        "keywords": []
+        // ... rest of your file
+    }
   "author": "",
   "license": "ISC",
   "dependencies": {
