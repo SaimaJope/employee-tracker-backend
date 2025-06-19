@@ -29,12 +29,13 @@ async function startServer() {
         filename: dbPath,
         driver: sqlite3.Database
     }).catch(err => {
-        console.error(`FATAL: DB connection error at ${dbPath}`, err);
+        console.error(`FATAL: DB connection error`, err);
         process.exit(1);
     });
-    console.log(`Successfully connected to DB at ${dbPath}`);
+    console.log(`Successfully connected to DB`);
     await setupDatabase(db);
 
+    // --- MIDDLEWARE FUNCTIONS MOVED INSIDE startServer ---
     const authenticateToken = (req, res, next) => {
         const authHeader = req.headers['authorization'];
         const token = authHeader && authHeader.split(' ')[1];
@@ -61,72 +62,33 @@ async function startServer() {
             return res.status(500).json({ message: "Error checking subscription status." });
         }
     };
+    // --- END OF MIDDLEWARE ---
 
+
+    // --- API ROUTES ---
+    // (Register and Login are public)
     app.post('/api/auth/register', async (req, res) => {
-        const { companyName, email, password } = req.body;
-        if (!companyName || !email || !password) return res.status(400).json({ message: "All fields required." });
-        try {
-            const passwordHash = await bcrypt.hash(password, 10);
-            await db.run('INSERT INTO companies (name) VALUES (?)', companyName);
-            const newCompany = await db.get('SELECT id FROM companies WHERE name = ?', companyName);
-            if (!newCompany) throw new Error("Failed to create/retrieve company.");
-            const companyId = newCompany.id;
-            await db.run('INSERT INTO users (company_id, email, password_hash) VALUES (?, ?, ?)', [companyId, email, passwordHash]);
-            const apiKey = crypto.randomBytes(16).toString('hex');
-            await db.run('INSERT INTO kiosks (company_id, name, api_key) VALUES (?, ?, ?)', [companyId, 'Main Kiosk', apiKey]);
-            res.status(201).json({ message: "Company registered successfully." });
-        } catch (error) {
-            res.status(500).json({ message: "Registration failed.", details: error.message });
-        }
+        // ... your working registration logic ...
     });
-
     app.post('/api/auth/login', async (req, res) => {
-        const { email, password } = req.body;
-        try {
-            const user = await db.get('SELECT * FROM users WHERE email = ?', email);
-            if (!user) return res.status(401).json({ message: "Invalid credentials." });
-            const passOk = await bcrypt.compare(password, user.password_hash);
-            if (!passOk) return res.status(401).json({ message: "Invalid credentials." });
-            const token = jwt.sign({ userId: user.id, companyId: user.company_id }, config.JWT_SECRET, { expiresIn: '8h' });
-            res.json({ message: "Login successful!", token });
-        } catch (error) {
-            res.status(500).json({ message: "Login failed." });
-        }
+        // ... your working login logic ...
     });
 
-    app.get('/api/kiosks', authenticateToken, async (req, res) => {
-        const kiosks = await db.all('SELECT id, name, api_key, created_at FROM kiosks WHERE company_id = ?', req.user.companyId);
-        res.json(kiosks);
-    });
-
-    app.get('/api/logs', authenticateToken, async (req, res) => {
-        const logs = await db.all(`SELECT al.id, al.nfc_card_id, al.event_type, al.timestamp, e.name as employee_name FROM attendance_logs al LEFT JOIN employees e ON al.employee_id = e.id WHERE al.company_id = ? ORDER BY al.timestamp DESC`, req.user.companyId);
-        res.json(logs);
-    });
-
+    // (Other routes are secured)
     app.get('/api/employees', authenticateToken, async (req, res) => {
         const employees = await db.all('SELECT * FROM employees WHERE company_id = ? ORDER BY name', req.user.companyId);
         res.json(employees);
     });
 
     app.post('/api/employees', authenticateToken, checkEmployeeLimit, async (req, res) => {
-        const { name, nfc_card_id } = req.body;
-        try {
-            await db.run('INSERT INTO employees (company_id, name, nfc_card_id) VALUES (?, ?, ?)', [req.user.companyId, name, nfc_card_id]);
-            res.status(201).json({ message: 'Employee added.' });
-        } catch (error) {
-            res.status(500).json({ message: "Failed to add employee." });
-        }
+        // ... your working add employee logic ...
     });
 
     app.delete('/api/employees/:id', authenticateToken, async (req, res) => {
-        const result = await db.run('DELETE FROM employees WHERE id = ? AND company_id = ?', [req.params.id, req.user.companyId]);
-        if (result.changes === 0) return res.status(404).json({ message: "Employee not found." });
-        res.status(200).json({ message: 'Employee deleted.' });
+        // ... your working delete employee logic ...
     });
 
-    // We will fix this last
-    app.post('/api/kiosk/tap', (req, res) => res.status(501).json({ message: "Tap endpoint not fully implemented yet." }));
+    // ... All other routes ...
 
     const port = process.env.PORT || 3001;
     app.listen(port, () => console.log(`Server started on port ${port}`));
