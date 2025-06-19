@@ -10,7 +10,6 @@
     "engines": {
         "node": "20.x"
     },
-    "keywords": [],
     "author": "SaimaJope",
     "license": "ISC",
     "dependencies": {
