@@ -46,7 +46,7 @@ async function startServer() {
         });
     };
 
-    // --- NEW ROBUST SUBSCRIPTION CHECK MIDDLEWARE ---
+    // --- Final, bulletproof subscription check middleware ---
     const checkEmployeeLimit = async (req, res, next) => {
         const companyId = req.user.companyId;
 
@@ -56,29 +56,30 @@ async function startServer() {
                 'SELECT max_employees FROM companies WHERE id = ?',
                 companyId
             );
-            if (!company) {
-                return res.status(404).json({ message: "Company not found." });
+            if (!company || typeof company.max_employees === 'undefined') {
+                return res.status(404).json({ message: "Could not determine subscription plan." });
             }
 
-            // Get the current employee count separately
-            const countRow = await db.get(
+            // Get the current employee count
+            const employeeCountResult = await db.get(
                 'SELECT COUNT(*) AS count FROM employees WHERE company_id = ?',
                 companyId
             );
-            const currentEmployees = countRow.count;
+            // Safely default to 0 if result is null/undefined
+            const currentEmployees = employeeCountResult ? employeeCountResult.count : 0;
 
-            console.log(`Company ${companyId}: Limit is ${company.max_employees}, Current is ${currentEmployees}`);
+            console.log(`Company ${companyId}: Limit is ${company.max_employees}, Current count is ${currentEmployees}`);
 
             if (currentEmployees >= company.max_employees) {
                 return res.status(403).json({
-                    message: `Employee limit of ${company.max_employees} reached. Please upgrade your plan.`
+                    message: `Employee limit of ${company.max_employees} reached. Please upgrade.`
                 });
             }
 
             next();
         } catch (error) {
-            console.error("Employee limit check failed:", error);
-            res.status(500).json({ message: "Error checking subscription status." });
+            console.error("CRITICAL: Employee limit check failed:", error);
+            res.status(500).json({ message: "Server error while checking subscription." });
         }
     };
 
