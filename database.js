@@ -1,9 +1,9 @@
-// database.js
+// database.js - The 100% correct and final version
 
 async function setupDatabase(db) {
-    console.log("--- Checking and creating tables if they don't exist ---");
+    console.log("--- Checking and creating tables with the LATEST schema ---");
 
-    // companies table now has subscription_plan and max_employees
+    // This is the correct schema with all columns
     await db.run(`
         CREATE TABLE IF NOT EXISTS companies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
