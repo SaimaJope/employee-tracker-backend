@@ -15,7 +15,10 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 // --- CONFIGURATION ---
 const config = {
     JWT_SECRET: process.env.JWT_SECRET,
-    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET
+    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
+    // Add success/cancel URLs from .env
+    SUCCESS_URL: process.env.STRIPE_SUCCESS_URL,
+    CANCEL_URL: process.env.STRIPE_CANCEL_URL
 };
 
 // --- SUBSCRIPTION PLANS ---
@@ -29,9 +32,9 @@ const SUBSCRIPTION_PLANS = {
 // --- APP SETUP ---
 const app = express();
 app.use(cors());
+// Stripe webhook needs raw body, so we apply this middleware conditionally
 app.use((req, res, next) => {
     if (req.originalUrl === '/api/subscription/webhook') {
-        // Use express.raw for the Stripe webhook to preserve the signature
         express.raw({ type: 'application/json' })(req, res, next);
     } else {
         express.json()(req, res, next);
@@ -43,6 +46,21 @@ app.get('/', (req, res) => res.status(200).send({ status: 'ok' }));
 const isProduction = process.env.NODE_ENV === 'production';
 const dataDir = isProduction ? process.env.RENDER_DISK_PATH : __dirname;
 const dbPath = path.join(dataDir, 'employee_tracker.db');
+
+// --- DATABASE HELPER ---
+// A helper to update a company's subscription details safely
+const updateCompanySubscription = async (db, customerId, newPlanKey, status = 'active') => {
+    const planDetails = SUBSCRIPTION_PLANS[newPlanKey];
+    if (planDetails) {
+        await db.run(
+            "UPDATE companies SET subscription_plan = ?, max_employees = ?, subscription_status = ? WHERE stripe_customer_id = ?",
+            newPlanKey, planDetails.max_employees, status, customerId
+        );
+        console.log(`Updated customer ${customerId} to plan ${newPlanKey} with status ${status}.`);
+    } else {
+        console.error(`Attempted to update to an unknown plan key: ${newPlanKey}`);
+    }
+};
 
 // --- MAIN SERVER FUNCTION ---
 async function startServer() {
@@ -79,8 +97,11 @@ async function startServer() {
     const checkEmployeeLimit = async (req, res, next) => {
         try {
             const company = await db.get('SELECT max_employees, subscription_status FROM companies WHERE id = ?', req.user.companyId);
-            if (!company || company.subscription_status !== 'active') {
-                return res.status(403).json({ message: "Your subscription is not active." });
+            if (!company) {
+                return res.status(403).json({ message: "Company not found." });
+            }
+            if (company.subscription_status !== 'active') {
+                return res.status(403).json({ message: "Your subscription is not active. Please check your billing." });
             }
             const countResult = await db.get('SELECT COUNT(*) AS count FROM employees WHERE company_id = ?', req.user.companyId);
             if (countResult.count >= company.max_employees) {
@@ -223,15 +244,20 @@ async function startServer() {
     app.post('/api/subscription/create-checkout-session', authenticateToken, async (req, res) => {
         const { priceId } = req.body;
         const { companyId, email } = req.user;
-        const successUrl = 'http://localhost:3000/success';
-        const cancelUrl = 'http://localhost:3000/cancel';
+
+        if (!config.SUCCESS_URL || !config.CANCEL_URL) {
+            return res.status(500).json({ message: 'Server configuration error: Success/Cancel URLs not set.' });
+        }
 
         try {
             let company = await db.get('SELECT stripe_customer_id FROM companies WHERE id = ?', companyId);
             let customerId = company.stripe_customer_id;
 
             if (!customerId) {
-                const customer = await stripe.customers.create({ email: email, metadata: { companyId: companyId } });
+                const customer = await stripe.customers.create({
+                    email: email,
+                    metadata: { companyId: companyId }
+                });
                 customerId = customer.id;
                 await db.run('UPDATE companies SET stripe_customer_id = ? WHERE id = ?', customerId, companyId);
             }
@@ -241,18 +267,25 @@ async function startServer() {
                 payment_method_types: ['card'],
                 line_items: [{ price: priceId, quantity: 1 }],
                 mode: 'subscription',
-                success_url: successUrl,
-                cancel_url: cancelUrl,
+                allow_promotion_codes: true,
+                success_url: config.SUCCESS_URL,
+                cancel_url: config.CANCEL_URL,
+                // Add metadata to link session to company
+                metadata: {
+                    companyId: companyId
+                }
             });
             res.json({ id: session.id });
         } catch (error) {
+            console.error("Stripe session creation failed:", error);
             res.status(500).json({ message: "Failed to create Stripe session." });
         }
     });
 
-    app.post('/api/subscription/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+    app.post('/api/subscription/webhook', async (req, res) => {
         const sig = req.headers['stripe-signature'];
         let event;
+
         try {
             event = stripe.webhooks.constructEvent(req.body, sig, config.STRIPE_WEBHOOK_SECRET);
         } catch (err) {
@@ -260,20 +293,34 @@ async function startServer() {
             return res.status(400).send(`Webhook Error: ${err.message}`);
         }
 
-        if (event.type === 'checkout.session.completed' && event.data.object.mode === 'subscription') {
-            const session = event.data.object;
-            const customerId = session.customer;
-            const subscription = await stripe.subscriptions.retrieve(session.subscription);
-            const priceId = subscription.items.data[0].price.id;
-            const [planKey, planDetails] = Object.entries(SUBSCRIPTION_PLANS).find(([, details]) => details.priceId === priceId) || [];
+        const session = event.data.object;
+        const customerId = session.customer;
 
-            if (planKey && planDetails) {
-                await db.run("UPDATE companies SET subscription_plan = ?, max_employees = ?, subscription_status = 'active' WHERE stripe_customer_id = ?",
-                    planKey, planDetails.max_employees, customerId
-                );
-                console.log(`SUCCESS: Upgraded customer ${customerId} to plan ${planKey}.`);
+        try {
+            if (event.type === 'checkout.session.completed' && session.mode === 'subscription') {
+                const subscription = await stripe.subscriptions.retrieve(session.subscription);
+                const priceId = subscription.items.data[0].price.id;
+                const [planKey] = Object.entries(SUBSCRIPTION_PLANS).find(([, details]) => details.priceId === priceId) || [];
+
+                if (planKey) {
+                    await updateCompanySubscription(db, customerId, planKey, 'active');
+                }
+            } else if (event.type === 'customer.subscription.updated') {
+                const priceId = session.items.data[0].price.id;
+                const [planKey] = Object.entries(SUBSCRIPTION_PLANS).find(([, details]) => details.priceId === priceId) || [];
+
+                if (planKey) {
+                    await updateCompanySubscription(db, customerId, planKey, session.status);
+                }
+            } else if (event.type === 'customer.subscription.deleted') {
+                // Downgrade to free plan on cancellation
+                await updateCompanySubscription(db, customerId, 'free', 'canceled');
             }
+        } catch (dbError) {
+            console.error("Database update failed after webhook:", dbError);
+            // Optionally, you could return a 500 here to have Stripe retry the webhook
         }
+
         res.json({ received: true });
     });
 
