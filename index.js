@@ -11,13 +11,25 @@ const crypto = require('crypto');
 const { setupDatabase } = require('./database');
 
 // --- CONFIGURATION ---
-const config = { JWT_SECRET: process.env.JWT_SECRET || 'your-default-dev-secret-key' };
-const SUBSCRIPTION_PLANS = { 'tier1': { max_employees: 5 }, 'tier2': { max_employees: 10 }, 'tier3': { max_employees: 50 } };
+const config = {
+    JWT_SECRET: process.env.JWT_SECRET || 'your-default-dev-secret-key',
+    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || 'sk_test_YOUR_KEY', // Get this from Stripe
+    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || 'whsec_YOUR_KEY' // Get this from Stripe
+};
+
+// Define plans with Stripe Price IDs (you will create these in the Stripe Dashboard)
+const SUBSCRIPTION_PLANS = {
+    'free': { name: 'Free', max_employees: 5, price: 0, priceId: null },
+    'tier1': { name: 'Starter', max_employees: 25, price: 10, priceId: 'price_xxxxxxxxxxxxxx' },
+    'tier2': { name: 'Business', max_employees: 100, price: 25, price: 'price_yyyyyyyyyyyyyy' }, // Changed to priceId as per user's prompt
+    'tier3': { name: 'Enterprise', max_employees: 500, price: 50, priceId: 'price_zzzzzzzzzzzzzz' }
+};
 
 // --- APP SETUP ---
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Note: express.json() is NOT used for the webhook endpoint as Stripe needs the raw body.
+// It will be applied selectively where needed.
 app.get('/', (req, res) => res.status(200).send({ status: 'ok' }));
 
 // --- DATABASE PATH ---
@@ -37,6 +49,12 @@ async function startServer() {
 
     // Run database setup/migrations.
     await setupDatabase(db);
+
+    // Initialize Stripe inside startServer so it can use config variables
+    const stripe = require('stripe')(config.STRIPE_SECRET_KEY);
+
+    // Middleware for parsing JSON bodies, applied only where needed
+    app.use(express.json());
 
     // --- MIDDLEWARE ---
     // All middleware and routes are defined *inside* startServer to access the 'db' object.
@@ -90,7 +108,13 @@ async function startServer() {
         if (!companyName || !email || !password) return res.status(400).json({ message: "All fields are required." });
         try {
             await db.run('BEGIN TRANSACTION');
-            const companyResult = await db.run('INSERT INTO companies (name, subscription_plan, max_employees) VALUES (?, ?, ?)', companyName, 'tier1', SUBSCRIPTION_PLANS['tier1'].max_employees);
+            // Change the default plan from 'tier1' to 'free' and set max_employees based on the 'free' plan
+            const companyResult = await db.run(
+                'INSERT INTO companies (name, subscription_plan, max_employees) VALUES (?, ?, ?)',
+                companyName,
+                'free', // <-- New users start on the free plan
+                SUBSCRIPTION_PLANS['free'].max_employees
+            );
             const newCompanyId = companyResult.lastID;
             const passwordHash = await bcrypt.hash(password, 10);
             await db.run('INSERT INTO users (company_id, email, password_hash) VALUES (?, ?, ?)', newCompanyId, email, passwordHash);
@@ -220,6 +244,90 @@ async function startServer() {
             res.status(500).json({ message: "Failed to fetch attendance logs." });
         }
     });
+
+    // --- SUBSCRIPTION ROUTES ---
+    // Endpoint to create a Stripe Checkout Session
+    app.post('/api/subscription/create-checkout-session', authenticateToken, async (req, res) => {
+        const { priceId } = req.body;
+        const companyId = req.user.companyId;
+
+        try {
+            // Find the company's Stripe Customer ID, or create a new one
+            let company = await db.get('SELECT stripe_customer_id FROM companies WHERE id = ?', companyId);
+            let customerId = company.stripe_customer_id;
+
+            if (!customerId) {
+                const customer = await stripe.customers.create({
+                    metadata: { companyId: companyId } // Link companyId to Stripe customer for easier lookup
+                });
+                customerId = customer.id;
+                await db.run('UPDATE companies SET stripe_customer_id = ? WHERE id = ?', customerId, companyId);
+            }
+
+            const session = await stripe.checkout.sessions.create({
+                customer: customerId,
+                payment_method_types: ['card'],
+                line_items: [{ price: priceId, quantity: 1 }],
+                mode: 'subscription',
+                // These URLs should ideally be dynamic or configurable for production
+                success_url: `http://localhost:3000/success?session_id={CHECKOUT_SESSION_ID}`, // For Electron app
+                cancel_url: `http://localhost:3000/cancel`,
+            });
+
+            res.json({ id: session.id });
+
+        } catch (error) {
+            console.error("Stripe session error:", error);
+            res.status(500).json({ message: "Failed to create Stripe session." });
+        }
+    });
+
+    // Webhook endpoint to handle Stripe events
+    // Note: This route does not use express.json() for the body, as Stripe needs the raw body
+    app.post('/api/subscription/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+        const sig = req.headers['stripe-signature'];
+        let event;
+
+        try {
+            // Construct the event from the raw body and signature
+            event = stripe.webhooks.constructEvent(req.body, sig, config.STRIPE_WEBHOOK_SECRET);
+        } catch (err) {
+            console.error(`Webhook Error: ${err.message}`);
+            return res.status(400).send(`Webhook Error: ${err.message}`);
+        }
+
+        // Handle the event
+        if (event.type === 'checkout.session.completed') {
+            const session = event.data.object;
+            const customerId = session.customer; // This is the Stripe Customer ID
+
+            // Retrieve the full subscription details
+            const subscription = await stripe.subscriptions.retrieve(session.subscription);
+            const priceId = subscription.items.data[0].price.id; // Get the price ID from the subscription
+
+            // Find the company in your database linked to this Stripe customer ID
+            // And update their plan based on the priceId from the completed session
+            const [planKey, planDetails] = Object.entries(SUBSCRIPTION_PLANS).find(([, details]) => details.priceId === priceId) || [];
+
+            if (planKey && planDetails) {
+                // Update the company's plan and max_employees in your database
+                await db.run(
+                    "UPDATE companies SET subscription_plan = ?, max_employees = ?, subscription_status = 'active' WHERE stripe_customer_id = ?",
+                    planKey,
+                    planDetails.max_employees,
+                    customerId
+                );
+                console.log(`Successfully upgraded customer ${customerId} to plan ${planKey}.`);
+            } else {
+                console.warn(`No matching plan found for priceId: ${priceId} or customerId: ${customerId}`);
+            }
+        }
+        // You can handle other event types here, e.g., 'customer.subscription.deleted', 'invoice.payment_failed'
+
+        // Return a 200 response to acknowledge receipt of the event
+        res.json({ received: true });
+    });
+
 
     // --- START SERVER ---
     const port = process.env.PORT || 10000;
