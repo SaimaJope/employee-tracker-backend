@@ -1,4 +1,4 @@
-// database.js - The final, safe, and correct version with a migration
+// database.js - The final, safe, and correct version with all migrations
 
 // A helper function to check if a column exists in a table
 async function columnExists(db, tableName, columnName) {
@@ -9,7 +9,7 @@ async function columnExists(db, tableName, columnName) {
 async function setupDatabase(db) {
     console.log("--- Starting database setup and migration check ---");
 
-    // First, create the table if it doesn't exist at all (for brand new setups)
+    // Create the 'companies' table if it doesn't exist
     await db.run(`
         CREATE TABLE IF NOT EXISTS companies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,39 +20,24 @@ async function setupDatabase(db) {
 
     // --- THE SAFE MIGRATION LOGIC ---
     if (!(await columnExists(db, 'companies', 'subscription_plan'))) {
-        console.log("!!! MIGRATION: 'subscription_plan' column not found in 'companies' table. Adding it now...");
-        try {
-            await db.run("ALTER TABLE companies ADD COLUMN subscription_plan TEXT DEFAULT 'tier1'");
-            console.log("--- MIGRATION: 'subscription_plan' column added successfully.");
-        } catch (e) {
-            console.error("--- MIGRATION FAILED for subscription_plan:", e);
-        }
-    } else {
-        console.log("--- Column 'subscription_plan' already exists. Skipping migration.");
+        console.log("!!! MIGRATION: 'subscription_plan' column not found. Adding it now...");
+        await db.run("ALTER TABLE companies ADD COLUMN subscription_plan TEXT DEFAULT 'free'");
     }
 
     if (!(await columnExists(db, 'companies', 'max_employees'))) {
-        console.log("!!! MIGRATION: 'max_employees' column not found in 'companies' table. Adding it now...");
-        try {
-            await db.run("ALTER TABLE companies ADD COLUMN max_employees INTEGER DEFAULT 5");
-            console.log("--- MIGRATION: 'max_employees' column added successfully.");
-        } catch (e) {
-            console.error("--- MIGRATION FAILED for max_employees:", e);
-        }
-    } else {
-        console.log("--- Column 'max_employees' already exists. Skipping migration.");
+        console.log("!!! MIGRATION: 'max_employees' column not found. Adding it now...");
+        await db.run("ALTER TABLE companies ADD COLUMN max_employees INTEGER DEFAULT 5");
     }
 
     if (!(await columnExists(db, 'companies', 'subscription_status'))) {
-        console.log("!!! MIGRATION: 'subscription_status' column not found in 'companies' table. Adding it now...");
-        try {
-            await db.run("ALTER TABLE companies ADD COLUMN subscription_status TEXT DEFAULT 'active'");
-            console.log("--- MIGRATION: 'subscription_status' column added successfully.");
-        } catch (e) {
-            console.error("--- MIGRATION FAILED for subscription_status:", e);
-        }
-    } else {
-        console.log("--- Column 'subscription_status' already exists. Skipping migration.");
+        console.log("!!! MIGRATION: 'subscription_status' column not found. Adding it now...");
+        await db.run("ALTER TABLE companies ADD COLUMN subscription_status TEXT DEFAULT 'active'");
+    }
+
+    // --- NEW MIGRATION FOR STRIPE ---
+    if (!(await columnExists(db, 'companies', 'stripe_customer_id'))) {
+        console.log("!!! MIGRATION: 'stripe_customer_id' column not found. Adding it now...");
+        await db.run("ALTER TABLE companies ADD COLUMN stripe_customer_id TEXT");
     }
 
     // Now, ensure all other tables exist
