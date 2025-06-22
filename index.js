@@ -1,5 +1,9 @@
 // index.js - The final, complete, and robust backend code
 
+// --- THIS IS THE NEW LINE ---
+// Load environment variables from .env file
+require('dotenv').config();
+
 const express = require('express');
 const { open } = require('sqlite');
 const sqlite3 = require('sqlite3');
@@ -12,16 +16,16 @@ const { setupDatabase } = require('./database');
 
 // --- CONFIGURATION ---
 const config = {
-    JWT_SECRET: process.env.JWT_SECRET || 'your-default-dev-secret-key',
-    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY || 'sk_test_YOUR_KEY', // Get this from Stripe
-    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET || 'whsec_YOUR_KEY' // Get this from Stripe
+    JWT_SECRET: process.env.JWT_SECRET, // Reads from .env
+    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY, // Reads from .env
+    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET // Reads from .env
 };
 
 // Define plans with Stripe Price IDs (you will create these in the Stripe Dashboard)
 const SUBSCRIPTION_PLANS = {
     'free': { name: 'Free', max_employees: 5, price: 0, priceId: null },
     'tier1': { name: 'Starter', max_employees: 25, price: 10, priceId: 'price_xxxxxxxxxxxxxx' },
-    'tier2': { name: 'Business', max_employees: 100, price: 25, price: 'price_yyyyyyyyyyyyyy' }, // Changed to priceId as per user's prompt
+    'tier2': { name: 'Business', max_employees: 100, price: 25, priceId: 'price_yyyyyyyyyyyyyy' }, // Corrected 'price' to 'priceId' here
     'tier3': { name: 'Enterprise', max_employees: 500, price: 50, priceId: 'price_zzzzzzzzzzzzzz' }
 };
 
