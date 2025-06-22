@@ -10,13 +10,30 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { setupDatabase } = require('./database');
+
+// --- ADDED: Environment Variable Check ---
+const requiredEnvVars = [
+    'JWT_SECRET',
+    'STRIPE_SECRET_KEY',
+    'STRIPE_WEBHOOK_SECRET',
+    'STRIPE_SUCCESS_URL',
+    'STRIPE_CANCEL_URL'
+];
+
+for (const varName of requiredEnvVars) {
+    if (!process.env[varName]) {
+        console.error(`FATAL ERROR: Environment variable ${varName} is not set.`);
+        process.exit(1); // Exit the application if a required variable is missing
+    }
+}
+// --- END OF ADDED CHECK ---
+
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
 // --- CONFIGURATION ---
 const config = {
     JWT_SECRET: process.env.JWT_SECRET,
     STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
-    // Add success/cancel URLs from .env
     SUCCESS_URL: process.env.STRIPE_SUCCESS_URL,
     CANCEL_URL: process.env.STRIPE_CANCEL_URL
 };
@@ -32,7 +49,6 @@ const SUBSCRIPTION_PLANS = {
 // --- APP SETUP ---
 const app = express();
 app.use(cors());
-// Stripe webhook needs raw body, so we apply this middleware conditionally
 app.use((req, res, next) => {
     if (req.originalUrl === '/api/subscription/webhook') {
         express.raw({ type: 'application/json' })(req, res, next);
@@ -48,7 +64,6 @@ const dataDir = isProduction ? process.env.RENDER_DISK_PATH : __dirname;
 const dbPath = path.join(dataDir, 'employee_tracker.db');
 
 // --- DATABASE HELPER ---
-// A helper to update a company's subscription details safely
 const updateCompanySubscription = async (db, customerId, newPlanKey, status = 'active') => {
     const planDetails = SUBSCRIPTION_PLANS[newPlanKey];
     if (planDetails) {
@@ -245,10 +260,6 @@ async function startServer() {
         const { priceId } = req.body;
         const { companyId, email } = req.user;
 
-        if (!config.SUCCESS_URL || !config.CANCEL_URL) {
-            return res.status(500).json({ message: 'Server configuration error: Success/Cancel URLs not set.' });
-        }
-
         try {
             let company = await db.get('SELECT stripe_customer_id FROM companies WHERE id = ?', companyId);
             let customerId = company.stripe_customer_id;
@@ -270,7 +281,6 @@ async function startServer() {
                 allow_promotion_codes: true,
                 success_url: config.SUCCESS_URL,
                 cancel_url: config.CANCEL_URL,
-                // Add metadata to link session to company
                 metadata: {
                     companyId: companyId
                 }
@@ -313,12 +323,10 @@ async function startServer() {
                     await updateCompanySubscription(db, customerId, planKey, session.status);
                 }
             } else if (event.type === 'customer.subscription.deleted') {
-                // Downgrade to free plan on cancellation
                 await updateCompanySubscription(db, customerId, 'free', 'canceled');
             }
         } catch (dbError) {
             console.error("Database update failed after webhook:", dbError);
-            // Optionally, you could return a 500 here to have Stripe retry the webhook
         }
 
         res.json({ received: true });
