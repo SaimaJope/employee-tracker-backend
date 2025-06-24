@@ -2,6 +2,8 @@
 
 require('dotenv').config();
 const express = require('express');
+const http = require('http'); // ADDED
+const { Server } = require("socket.io"); // ADDED
 const { open } = require('sqlite');
 const sqlite3 = require('sqlite3');
 const cors = require('cors');
@@ -48,6 +50,16 @@ const SUBSCRIPTION_PLANS = {
 
 // --- APP SETUP ---
 const app = express();
+// --- ADDED: Create HTTP server and Socket.IO server ---
+const httpServer = http.createServer(app);
+const io = new Server(httpServer, {
+    cors: {
+        origin: "*", // Allows all origins, fine for this project
+        methods: ["GET", "POST"]
+    }
+});
+// --------------------------------------------------------
+
 app.use(cors());
 app.use((req, res, next) => {
     if (req.originalUrl === '/api/subscription/webhook') {
@@ -209,7 +221,15 @@ async function startServer() {
             if (!employee) return res.status(404).json({ success: false, message: `Card not recognized.` });
             const lastLog = await db.get('SELECT event_type FROM attendance_logs WHERE employee_id = ? ORDER BY timestamp DESC LIMIT 1', employee.id);
             const newEventType = (!lastLog || lastLog.event_type === 'clock-out') ? 'clock-in' : 'clock-out';
+
             await db.run('INSERT INTO attendance_logs (company_id, employee_id, kiosk_id, nfc_card_id, event_type) VALUES (?, ?, ?, ?, ?)', company_id, employee.id, kiosk_id, nfc_card_id, newEventType);
+
+            // --- THIS IS THE MAGIC PART ---
+            // After successfully saving the log, emit an event to all connected clients
+            io.emit('new_log_entry');
+            console.log('Emitted "new_log_entry" event to all connected clients.');
+            // -----------------------------
+
             const actionMessage = newEventType === 'clock-in' ? 'Clocked In' : 'Clocked Out';
             res.status(200).json({ success: true, message: `${employee.name}\n${actionMessage}`, employee_name: employee.name, action: newEventType });
         } catch (error) {
@@ -333,8 +353,10 @@ async function startServer() {
     });
 
     // --- START SERVER ---
+    // --- MODIFIED: Listen on httpServer instead of app ---
     const port = process.env.PORT || 10000;
-    app.listen(port, () => console.log(`Server started on port ${port}`));
+    httpServer.listen(port, () => console.log(`Server started on port ${port}`));
+    // -----------------------------------------------------
 }
 
 startServer();
